@@ -78,7 +78,20 @@ class TripViewSet(viewsets.ModelViewSet):
         if trip.rider != request.user or trip.status != 'IN_PROGRESS':
             return Response({'error': 'Invalid operation.'}, status=status.HTTP_400_BAD_REQUEST)
             
+        # Basic MVP Fare Calculation (Euclidean distance * Base Rate)
+        # In production, use PostGIS distance or Google Maps API
+        import math
+        dx = trip.dropoff_latitude - trip.pickup_latitude
+        dy = trip.dropoff_longitude - trip.pickup_longitude
+        distance_deg = math.sqrt(dx*dx + dy*dy)
+        distance_km = distance_deg * 111 # rough approximation
+        
+        base_fare = 50.0  # e.g., 50 KES base
+        rate_per_km = 30.0 # 30 KES per km
+        total_fare = base_fare + (distance_km * rate_per_km)
+        
         trip.status = 'COMPLETED'
         trip.completed_at = timezone.now()
+        trip.fare = round(total_fare, 2)
         trip.save()
         return Response(TripSerializer(trip).data)
