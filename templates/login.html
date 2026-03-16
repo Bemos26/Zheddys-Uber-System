@@ -1,0 +1,92 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div style="flex: 1; display: flex; justify-content: center; align-items: center; background: url('https://images.unsplash.com/photo-1558981403-c5f9899a28bc?ixlib=rb-4.0.3&auto=format&fit=crop&w=1920&q=80') center/cover;">
+    
+    <div style="background: rgba(255, 255, 255, 0.95); padding: 3rem; border-radius: var(--border-radius); width: 100%; max-width: 400px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); backdrop-filter: blur(10px);">
+        
+        <h2 style="text-align: center; color: var(--secondary); margin-bottom: 2rem;">Welcome Back</h2>
+        
+        <div id="error-msg" style="color: red; text-align: center; margin-bottom: 1rem; display: none;">Invalid credentials</div>
+
+        <form id="login-form" style="display: flex; flex-direction: column; gap: 1rem;">
+            <div class="input-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" required placeholder="Enter your username">
+            </div>
+            
+            <div class="input-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" required placeholder="••••••••">
+            </div>
+            
+            <button type="submit" class="btn" style="margin-top: 1rem; padding: 12px; font-size: 1.1rem;">Login</button>
+        </form>
+
+        <p style="text-align: center; margin-top: 1.5rem; color: #666; font-size: 0.9rem;">
+            Don't have an account? <br>
+            <a href="#" style="color: var(--primary); text-decoration: none; font-weight: 600;">Sign up via API (for now)</a>
+        </p>
+
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const username = document.getElementById('username').value;
+        const password = document.getElementById('password').value;
+        const errorMsg = document.getElementById('error-msg');
+        
+        try {
+            const response = await fetch('/api/users/login/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                localStorage.setItem('access_token', data.access);
+                localStorage.setItem('refresh_token', data.refresh);
+                
+                // Fetch user profile to get role
+                const profileRes = await fetch('/api/users/profile/', {
+                    headers: { 'Authorization': `Bearer ${data.access}` }
+                });
+                
+                if (profileRes.ok) {
+                    const profileData = await profileRes.json();
+                    localStorage.setItem('user_role', profileData.role);
+                    localStorage.setItem('username', profileData.username);
+                    
+                    // Redirect based on role
+                    if (profileData.role === 'rider') {
+                        window.location.href = '/rider/';
+                    } else {
+                        window.location.href = '/passenger/';
+                    }
+                }
+            } else {
+                errorMsg.style.display = 'block';
+            }
+        } catch (error) {
+            console.error('Login error:', error);
+            errorMsg.innerText = 'Network error. Please try again.';
+            errorMsg.style.display = 'block';
+        }
+    });
+
+    // If already logged in, redirect
+    if (localStorage.getItem('access_token')) {
+        if (localStorage.getItem('user_role') === 'rider') {
+             window.location.href = '/rider/';
+        } else {
+             window.location.href = '/passenger/';
+        }
+    }
+</script>
+{% endblock %}

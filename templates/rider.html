@@ -1,0 +1,236 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div id="map"></div>
+
+<div class="floating-panel">
+    <h2>Rider Dashboard</h2>
+    
+    <div id="status-display" class="status-badge" style="background: #e9ecef;">Offline</div>
+
+    <div id="controls">
+        <button id="toggle-online-btn" class="btn" style="width: 100%;">Go Online</button>
+    </div>
+    
+    <!-- Incoming Request Modal -->
+    <div id="incoming-request" class="hidden" style="margin-top: 15px; padding: 15px; border: 2px solid var(--primary); border-radius: 8px; background: #fffaf0;">
+        <h3 style="color: var(--primary); margin-bottom: 10px;">🚨 New Ride Request!</h3>
+        <p><strong>Passenger:</strong> <span id="req-passenger-name"></span></p>
+        <p style="font-size: 0.9em; color: #555; margin-top: 5px;">📍 Pending Location</p>
+        
+        <div style="display: flex; gap: 10px; margin-top: 15px;">
+            <button id="accept-btn" class="btn" style="flex: 1; background: #28a745; color: white;">Accept</button>
+            <button id="decline-btn" class="btn btn-outline" style="flex: 1; color: #dc3545; border-color: #dc3545;">Decline</button>
+        </div>
+    </div>
+
+    <!-- Active Trip Controls -->
+    <div id="active-trip-controls" class="hidden" style="margin-top: 15px;">
+        <p style="font-weight: 600; margin-bottom: 10px;">Current Trip: <span id="active-status" style="color: var(--primary);">ACCEPTED</span></p>
+        <button id="arrive-btn" class="btn btn-outline" style="width: 100%; margin-bottom: 10px;">I have Arrived</button>
+        <button id="start-btn" class="btn btn-outline hidden" style="width: 100%; margin-bottom: 10px;">Start Trip</button>
+        <button id="complete-btn" class="btn hidden" style="width: 100%; background: #28a745; color: white;">Complete Trip</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    if (!token || userRole !== 'rider') {
+        window.location.href = '/login/';
+    }
+
+    // Initialize Map
+    const map = L.map('map').setView([-1.286389, 36.817223], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let isOnline = false;
+    let ws;
+    let myLocMarker;
+    let passengerMarker;
+    let currentTripId = null;
+
+    // 1. Get Rider Location & Simulate Movement
+    function updateLocation() {
+        if (navigator.geolocation && isOnline) {
+            navigator.geolocation.getCurrentPosition((position) => {
+                const coords = [position.coords.latitude, position.coords.longitude];
+                
+                if(!myLocMarker) {
+                    map.setView(coords, 15);
+                    myLocMarker = L.marker(coords, {
+                        icon: L.icon({
+                            iconUrl: 'https://cdn.rawgit.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-black.png',
+                            shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                            iconSize: [25, 41],
+                            iconAnchor: [12, 41]
+                        })
+                    }).addTo(map).bindPopup("My Location");
+                } else {
+                    myLocMarker.setLatLng(coords);
+                }
+
+                // Send to backend via WebSocket
+                if(ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        action: 'update_location',
+                        latitude: coords[0],
+                        longitude: coords[1]
+                    }));
+                }
+            });
+        }
+    }
+
+    // 2. Connect WebSocket
+    function connectWebSocket() {
+        const wsUrl = `ws://${window.location.host}/ws/rides/`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+             console.log("WebSocket connected.");
+             updateLocation(); // Send initial location
+             // Start location tracking interval (every 10 seconds)
+             window.locInterval = setInterval(updateLocation, 10000); 
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log("Message received:", data);
+            
+            if (data.type === 'ride_requested' && isOnline && !currentTripId) {
+                // Show incoming request UI
+                document.getElementById('incoming-request').classList.remove('hidden');
+                document.getElementById('req-passenger-name').innerText = data.passenger_name;
+                
+                // Store temp data
+                window.incomingTripId = data.trip_id;
+                window.incomingPickup = data.pickup;
+                window.incomingDropoff = data.dropoff;
+            }
+        };
+
+        ws.onclose = () => {
+            clearInterval(window.locInterval);
+        }
+    }
+
+    // 3. UI Toggles
+    document.getElementById('toggle-online-btn').addEventListener('click', (e) => {
+        isOnline = !isOnline;
+        const btn = e.target;
+        const badge = document.getElementById('status-display');
+        
+        if (isOnline) {
+            btn.innerText = 'Go Offline';
+            btn.classList.add('btn-outline');
+            badge.innerText = 'Online - Waiting for rides';
+            badge.style.background = '#c3e6cb';
+            connectWebSocket();
+        } else {
+            btn.innerText = 'Go Online';
+            btn.classList.remove('btn-outline');
+            badge.innerText = 'Offline';
+            badge.style.background = '#e9ecef';
+            if(ws) ws.close();
+            document.getElementById('incoming-request').classList.add('hidden');
+        }
+    });
+
+    // 4. Accept/Decline Logic
+    document.getElementById('accept-btn').addEventListener('click', async () => {
+        try {
+            const tripId = window.incomingTripId;
+            const res = await apiCall(`/rides/trips/${tripId}/accept/`, 'POST');
+            
+            if (res.ok) {
+                currentTripId = tripId;
+                document.getElementById('incoming-request').classList.add('hidden');
+                document.getElementById('active-trip-controls').classList.remove('hidden');
+                
+                // Show passenger on map
+                passengerMarker = L.marker(window.incomingPickup, {
+                    icon: L.icon({
+                        iconUrl: 'https://cdn.rawgit.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+                        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                        iconSize: [25, 41],
+                        iconAnchor: [12, 41]
+                    })
+                }).addTo(map).bindPopup("Passenger Pickup");
+                
+                // Draw line to passenger
+                if(myLocMarker) {
+                   window.routeLine = L.polyline([myLocMarker.getLatLng(), window.incomingPickup], {color: 'blue'}).addTo(map);
+                   map.fitBounds(window.routeLine.getBounds(), {padding: [50, 50]});
+                }
+
+                // Notify Passenger via WS that we accepted (Requires a small update to consumer later to route this specifically, but REST handles DB state)
+                ws.send(JSON.stringify({
+                    action: 'accept_ride',
+                    trip_id: currentTripId
+                }));
+            } else {
+                alert("Trip already accepted or unavailable.");
+                document.getElementById('incoming-request').classList.add('hidden');
+            }
+        } catch (e) {}
+    });
+
+    document.getElementById('decline-btn').addEventListener('click', () => {
+        document.getElementById('incoming-request').classList.add('hidden');
+        window.incomingTripId = null;
+    });
+
+    // 5. Trip State Machine Buttons
+    document.getElementById('arrive-btn').addEventListener('click', async (e) => {
+        const res = await apiCall(`/rides/trips/${currentTripId}/arrive/`, 'POST');
+        if (res.ok) {
+            e.target.classList.add('hidden');
+            document.getElementById('start-btn').classList.remove('hidden');
+            document.getElementById('active-status').innerText = 'EN ROUTE';
+            
+            // Send WS event to notify passenger
+            ws.send(JSON.stringify({ action: 'rider_arrived', trip_id: currentTripId }));
+        }
+    });
+
+    document.getElementById('start-btn').addEventListener('click', async (e) => {
+        const res = await apiCall(`/rides/trips/${currentTripId}/start/`, 'POST');
+        if (res.ok) {
+            e.target.classList.add('hidden');
+            document.getElementById('complete-btn').classList.remove('hidden');
+            document.getElementById('active-status').innerText = 'IN PROGRESS';
+            
+            // Move marker to dropoff
+            if(passengerMarker) map.removeLayer(passengerMarker);
+            passengerMarker = L.marker(window.incomingDropoff, {
+                icon: L.icon({
+                    iconUrl: 'https://cdn.rawgit.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+                    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                    iconSize: [25, 41],
+                    iconAnchor: [12, 41]
+                })
+            }).addTo(map).bindPopup("Dropoff");
+
+            if(window.routeLine) map.removeLayer(window.routeLine);
+            window.routeLine = L.polyline([myLocMarker.getLatLng(), window.incomingDropoff], {color: 'red'}).addTo(map);
+            map.fitBounds(window.routeLine.getBounds(), {padding: [50, 50]});
+        }
+    });
+
+    document.getElementById('complete-btn').addEventListener('click', async (e) => {
+        const res = await apiCall(`/rides/trips/${currentTripId}/complete/`, 'POST');
+        if (res.ok) {
+            alert("Trip Completed Successfully! Fare calculated.");
+            // Reset UI
+            document.getElementById('active-trip-controls').classList.add('hidden');
+            currentTripId = null;
+            if(passengerMarker) map.removeLayer(passengerMarker);
+            if(window.routeLine) map.removeLayer(window.routeLine);
+        }
+    });
+
+</script>
+{% endblock %}

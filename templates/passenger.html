@@ -1,0 +1,175 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div id="map"></div>
+
+<div class="floating-panel">
+    <h2>Where to?</h2>
+    
+    <div id="status-display" class="status-badge hidden"></div>
+
+    <div id="request-controls">
+        <div class="input-group">
+            <label>Pickup Location</label>
+            <input type="text" id="pickup-input" value="Current Location" readonly style="background: #f0f0f0;">
+        </div>
+        
+        <div class="input-group">
+            <label>Destination</label>
+            <input type="text" id="dropoff-input" placeholder="Tap on the map to set destination" readonly>
+        </div>
+        
+        <button id="request-btn" class="btn" style="width: 100%; margin-top: 10px;" disabled>Request Boda</button>
+    </div>
+    
+    <div id="trip-controls" class="hidden">
+        <p>Your rider is on the way!</p>
+        <button id="cancel-btn" class="btn btn-outline" style="width: 100%; margin-top: 10px; color: red; border-color: red;">Cancel Trip</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    if (!token || userRole !== 'passenger') {
+        window.location.href = '/login/';
+    }
+
+    // Initialize Map centered on Nairobi (placeholder)
+    const map = L.map('map').setView([-1.286389, 36.817223], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let pickupMarker, dropoffMarker;
+    let pickupCoords, dropoffCoords;
+    let ws;
+    let currentTripId = null;
+
+    // 1. Get User Location
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition((position) => {
+            pickupCoords = [position.coords.latitude, position.coords.longitude];
+            map.setView(pickupCoords, 15);
+            
+            pickupMarker = L.marker(pickupCoords, {
+                icon: L.icon({
+                    iconUrl: 'https://cdn.rawgit.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+                    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                    iconSize: [25, 41],
+                    iconAnchor: [12, 41]
+                })
+            }).addTo(map).bindPopup("Pickup");
+        }, (err) => {
+            console.error("Location error:", err);
+            alert("Please enable location services to use the app.");
+        });
+    }
+
+    // 2. Map Clicking for Dropoff
+    map.on('click', function(e) {
+        if (!pickupCoords) {
+             alert('Waiting for GPS pickup location...'); 
+             return;
+        }
+
+        dropoffCoords = [e.latlng.lat, e.latlng.lng];
+        
+        if (dropoffMarker) {
+            map.removeLayer(dropoffMarker);
+        }
+        
+        dropoffMarker = L.marker(dropoffCoords, {
+            icon: L.icon({
+                iconUrl: 'https://cdn.rawgit.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41]
+            })
+        }).addTo(map).bindPopup("Dropoff");
+
+        document.getElementById('dropoff-input').value = `${dropoffCoords[0].toFixed(4)}, ${dropoffCoords[1].toFixed(4)}`;
+        document.getElementById('request-btn').disabled = false;
+        
+        // Draw route line (basic straight line for MVP)
+        if(window.routeLine) map.removeLayer(window.routeLine);
+        window.routeLine = L.polyline([pickupCoords, dropoffCoords], {color: 'blue', dashArray: '5, 10'}).addTo(map);
+        map.fitBounds(window.routeLine.getBounds(), {padding: [50, 50]});
+    });
+
+    // 3. Connect WebSocket for live updates
+    function connectWebSocket() {
+        const wsUrl = `ws://${window.location.host}/ws/rides/`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+             console.log("WebSocket connected.");
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log("Message received:", data);
+            
+            if (data.type === 'ride_accepted' && data.trip_id === currentTripId) {
+                updateUIStatus('ACCEPTED', 'Rider is confirmed! 🏍️');
+            } else if (data.type === 'rider_arrived' && data.trip_id === currentTripId) {
+                updateUIStatus('EN_ROUTE', 'Rider has arrived! 📍');
+            }
+        };
+    }
+    
+    connectWebSocket();
+
+    // 4. Request Ride Action
+    document.getElementById('request-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('request-btn');
+        btn.innerText = 'Requesting...';
+        btn.disabled = true;
+
+        try {
+            // First, create trip in the database via REST API
+            const response = await apiCall('/rides/trips/', 'POST', {
+                pickup_latitude: pickupCoords[0],
+                pickup_longitude: pickupCoords[1],
+                dropoff_latitude: dropoffCoords[0],
+                dropoff_longitude: dropoffCoords[1],
+                pickup_address: 'Current Location',
+                dropoff_address: 'Map Selection'
+            });
+
+            if (response.ok) {
+                const tripData = await response.json();
+                currentTripId = tripData.id;
+                
+                // Then broadcast on WebSockets for riders
+                ws.send(JSON.stringify({
+                    action: 'request_ride',
+                    trip_id: currentTripId,
+                    pickup: pickupCoords,
+                    dropoff: dropoffCoords
+                }));
+
+                // Update UI
+                document.getElementById('request-controls').classList.add('hidden');
+                document.getElementById('trip-controls').classList.remove('hidden');
+                updateUIStatus('REQUESTED', 'Looking for riders...');
+            } else {
+                alert("Error creating trip. Please try again.");
+                btn.innerText = 'Request Boda';
+                btn.disabled = false;
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    });
+
+    function updateUIStatus(status, text) {
+        const badge = document.getElementById('status-display');
+        badge.classList.remove('hidden');
+        badge.innerText = text;
+        
+        if(status === 'REQUESTED') badge.style.background = '#e9ecef';
+        if(status === 'ACCEPTED') badge.style.background = '#c3e6cb';
+    }
+</script>
+{% endblock %}
